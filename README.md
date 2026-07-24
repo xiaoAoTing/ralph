@@ -20,7 +20,7 @@ Ralph 是一个自主 AI 编程代理循环工具。它读取 `prd.json` 中的�
 ```bash
 cd your-project
 mkdir -p scripts && cd scripts
-git clone https://github.com/mccullough/ralph.git .
+git clone https://github.com/xiaoAoTing/ralph.git .
 rm -rf .git
 chmod +x ralph.sh
 ```
