@@ -2,7 +2,7 @@
 # Qoder/Ralph Long-running AI Agent Loop
 # Usage: ./qoder-loop.sh [--tool qoder|claude|amp|custom] [--cmd "custom command"] [max_iterations]
 
-set -e
+set -eo pipefail
 
 # 默认配置
 TOOL="qoder"          # 默认使用 qodercli
@@ -110,6 +110,8 @@ run_ai_tool() {
   local tool_type="$1"
   local prompt_path="$2"
 
+  cd "$SCRIPT_DIR"
+
   case "$tool_type" in
     qoder|qodercli)
       # qodercli 模式：自动接受执行并批处理运行
@@ -137,6 +139,18 @@ run_ai_tool() {
       ;;
   esac
 }
+
+# 前置校验
+if ! command -v jq &>/dev/null; then
+  echo "Error: 'jq' is required but not installed. Install it via: brew install jq" >&2
+  exit 1
+fi
+
+if [ ! -f "$PROMPT_FILE" ]; then
+  echo "Error: Prompt file not found: $PROMPT_FILE" >&2
+  echo "Create a prompt.md (or CLAUDE.md) in $SCRIPT_DIR" >&2
+  exit 1
+fi
 
 echo "Starting Agent Loop - Tool: $TOOL - Max iterations: $MAX_ITERATIONS"
 
