@@ -114,8 +114,8 @@ run_ai_tool() {
 
   case "$tool_type" in
     qoder|qodercli)
-      # qodercli 模式：自动接受执行并批处理运行
-      cat "$prompt_path" | qodercli --yolo 2>&1
+      # qodercli 模式：非交互模式 + 跳过权限确认
+      qodercli -p --dangerously-skip-permissions "$(cat "$prompt_path")" 2>&1
       ;;
     claude)
       # Claude Code 模式
