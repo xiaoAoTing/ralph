@@ -124,8 +124,8 @@ run_ai_tool() {
 
   case "$tool_type" in
     qoder|qodercli)
-      # qodercli 模式：非交互模式 + 跳过权限确认
-      qodercli -p --dangerously-skip-permissions "$(cat "$prompt_path")" 2>&1
+      # qodercli 模式：非交互 + 流式 JSON 输出 + 跳过权限确认
+      qodercli -p --output-format stream-json --dangerously-skip-permissions "$(cat "$prompt_path")" 2>&1
       ;;
     claude)
       # Claude Code 模式
@@ -174,26 +174,75 @@ format_duration() {
   fi
 }
 
-# macOS 兼容的超时控制
-run_with_timeout() {
+# 解析 stream-json 输出为可读进度
+parse_stream() {
+  local tool_count=0
+  while IFS= read -r line; do
+    local type
+    type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null) || continue
+
+    case "$type" in
+      assistant)
+        local tools
+        tools=$(echo "$line" | jq -r '.message.content[]? | select(.type=="tool_use") | .name' 2>/dev/null)
+        for tool in $tools; do
+          tool_count=$((tool_count + 1))
+          echo "  [$tool_count] Tool: $tool"
+        done
+        local text
+        text=$(echo "$line" | jq -r '.message.content[]? | select(.type=="text") | .text' 2>/dev/null | head -c 120)
+        if [ -n "$text" ]; then
+          echo "  >> ${text}..."
+        fi
+        ;;
+      result)
+        local subtype
+        subtype=$(echo "$line" | jq -r '.subtype // empty' 2>/dev/null)
+        echo "  [result] $subtype"
+        ;;
+    esac
+  done
+}
+
+# macOS 兼容的超时控制 + 实时输出
+# 使用临时文件 + 后台进程组 kill，避免 $() 缓冲导致无输出
+TMP_OUTPUT=$(mktemp)
+trap "rm -f $TMP_OUTPUT" EXIT
+
+run_iteration() {
   local timeout_secs=$1
-  shift
-  "$@" &
+  local tool_type=$2
+  local prompt_path=$3
+
+  # 启动 AI 工具：原始 JSON 写入临时文件，同时通过解析器实时显示进度
+  run_ai_tool "$tool_type" "$prompt_path" 2>&1 | tee "$TMP_OUTPUT" | parse_stream &
   local cmd_pid=$!
 
-  # 后台计时器
-  ( sleep "$timeout_secs" && kill "$cmd_pid" 2>/dev/null ) &
+  # 后台心跳：每 30 秒打印一个点，让用户知道还活着
+  (
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout_secs" ]; do
+      sleep 30
+      elapsed=$((elapsed + 30))
+      echo "  [heartbeat] running... $(format_duration $elapsed)"
+    done
+  ) &
+  local heartbeat_pid=$!
+
+  # 后台超时计时器
+  ( sleep "$timeout_secs" && kill -- -$$ 2>/dev/null ) &
   local timer_pid=$!
 
+  # 等待 AI 工具完成
   wait "$cmd_pid" 2>/dev/null
   local exit_code=$?
 
-  # 如果进程还在，说明是超时 kill 的
-  kill "$timer_pid" 2>/dev/null
-  wait "$timer_pid" 2>/dev/null
+  # 清理后台进程
+  kill "$timer_pid" "$heartbeat_pid" 2>/dev/null
+  wait "$timer_pid" "$heartbeat_pid" 2>/dev/null
 
   if [ "$exit_code" -eq 137 ] || [ "$exit_code" -eq 143 ]; then
-    return 124  # 模拟 timeout 命令的退出码
+    return 124
   fi
   return $exit_code
 }
@@ -211,14 +260,15 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   echo "   Started: $(date '+%H:%M:%S') | Total elapsed: $(format_duration $ELAPSED_TOTAL)"
   echo "==============================================================="
 
-  # 带超时控制的执行
+  # 清空临时文件并执行
+  > "$TMP_OUTPUT"
   TIMEOUT_EXIT=0
-  OUTPUT=$(run_with_timeout "$TIMEOUT_SECS" bash -c "$(declare -f run_ai_tool); run_ai_tool '$TOOL' '$PROMPT_FILE'" 2>&1 | tee /dev/stderr) || TIMEOUT_EXIT=$?
+  run_iteration "$TIMEOUT_SECS" "$TOOL" "$PROMPT_FILE" || TIMEOUT_EXIT=$?
 
   ITER_END=$(date +%s)
   ITER_DURATION=$(( ITER_END - ITER_START ))
 
-  # 超时检测 (timeout 命令返回 124)
+  # 超时检测
   if [ "$TIMEOUT_EXIT" -eq 124 ]; then
     echo ""
     echo "!!! Iteration $i TIMED OUT after $(format_duration $TIMEOUT_SECS)"
@@ -237,8 +287,8 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     continue
   fi
 
-  # 检查任务完成标志
-  if echo "$OUTPUT" | grep -q "<promise>COMPLETE</promise>"; then
+  # 检查任务完成标志（从临时文件读取）
+  if grep -q "<promise>COMPLETE</promise>" "$TMP_OUTPUT"; then
     TOTAL_END=$(date +%s)
     TOTAL_DURATION=$(( TOTAL_END - LOOP_START ))
     echo ""
