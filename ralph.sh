@@ -8,6 +8,7 @@ set -eo pipefail
 TOOL="qoder"          # 默认使用 qodercli
 MAX_ITERATIONS=10
 CUSTOM_CMD=""
+TIMEOUT_SECS=900      # 单次迭代超时（秒），默认 15 分钟
 
 # 帮助信息
 show_help() {
@@ -16,6 +17,7 @@ show_help() {
   echo "Options:"
   echo "  --tool TOOL         指定 AI 工具 (qoder|claude|amp|custom)，默认: qoder"
   echo "  --cmd COMMAND       当 --tool=custom 时使用的自定义命令"
+  echo "  --timeout SECS      单次迭代超时秒数，默认: 900 (15分钟)"
   echo "  -h, --help          显示帮助信息"
   echo ""
   echo "Examples:"
@@ -42,6 +44,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cmd=*)
       CUSTOM_CMD="${1#*=}"
+      shift
+      ;;
+    --timeout)
+      TIMEOUT_SECS="$2"
+      shift 2
+      ;;
+    --timeout=*)
+      TIMEOUT_SECS="${1#*=}"
       shift
       ;;
     -h|--help)
@@ -152,30 +162,76 @@ if [ ! -f "$PROMPT_FILE" ]; then
   exit 1
 fi
 
-echo "Starting Agent Loop - Tool: $TOOL - Max iterations: $MAX_ITERATIONS"
+echo "Starting Agent Loop - Tool: $TOOL - Max iterations: $MAX_ITERATIONS - Timeout: ${TIMEOUT_SECS}s/iteration"
+
+# 格式化耗时
+format_duration() {
+  local secs=$1
+  if [ "$secs" -ge 60 ]; then
+    printf "%dm%02ds" $((secs / 60)) $((secs % 60))
+  else
+    printf "%ds" "$secs"
+  fi
+}
+
+LOOP_START=$(date +%s)
+FAILED_ITERATIONS=0
 
 for i in $(seq 1 $MAX_ITERATIONS); do
+  ITER_START=$(date +%s)
+  ELAPSED_TOTAL=$(( ITER_START - LOOP_START ))
+
   echo ""
   echo "==============================================================="
   echo "   Iteration $i of $MAX_ITERATIONS ($TOOL)"
+  echo "   Started: $(date '+%H:%M:%S') | Total elapsed: $(format_duration $ELAPSED_TOTAL)"
   echo "==============================================================="
 
-  # 执行映射函数并实时捕获输出
-  OUTPUT=$(run_ai_tool "$TOOL" "$PROMPT_FILE" | tee /dev/stderr) || true
-  
+  # 带超时控制的执行
+  TIMEOUT_EXIT=0
+  OUTPUT=$(timeout "$TIMEOUT_SECS" bash -c "$(declare -f run_ai_tool); run_ai_tool '$TOOL' '$PROMPT_FILE'" 2>&1 | tee /dev/stderr) || TIMEOUT_EXIT=$?
+
+  ITER_END=$(date +%s)
+  ITER_DURATION=$(( ITER_END - ITER_START ))
+
+  # 超时检测 (timeout 命令返回 124)
+  if [ "$TIMEOUT_EXIT" -eq 124 ]; then
+    echo ""
+    echo "!!! Iteration $i TIMED OUT after $(format_duration $TIMEOUT_SECS)"
+    echo "!!! Increase timeout with: --timeout <seconds>"
+    FAILED_ITERATIONS=$((FAILED_ITERATIONS + 1))
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Iteration $i TIMEOUT after $(format_duration $TIMEOUT_SECS)" >> "$PROGRESS_FILE"
+    continue
+  fi
+
+  # 其他错误检测
+  if [ "$TIMEOUT_EXIT" -ne 0 ]; then
+    echo ""
+    echo "!!! Iteration $i FAILED (exit code: $TIMEOUT_EXIT) after $(format_duration $ITER_DURATION)"
+    FAILED_ITERATIONS=$((FAILED_ITERATIONS + 1))
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Iteration $i FAILED (exit: $TIMEOUT_EXIT)" >> "$PROGRESS_FILE"
+    continue
+  fi
+
   # 检查任务完成标志
   if echo "$OUTPUT" | grep -q "<promise>COMPLETE</promise>"; then
+    TOTAL_END=$(date +%s)
+    TOTAL_DURATION=$(( TOTAL_END - LOOP_START ))
     echo ""
-    echo "🎉 Agent completed all tasks successfully!"
+    echo "Agent completed all tasks successfully!"
     echo "Completed at iteration $i of $MAX_ITERATIONS"
+    echo "Total time: $(format_duration $TOTAL_DURATION) | Failed iterations: $FAILED_ITERATIONS"
     exit 0
   fi
-  
-  echo "Iteration $i complete. Continuing..."
+
+  echo "Iteration $i complete in $(format_duration $ITER_DURATION). Continuing..."
   sleep 2
 done
 
+TOTAL_END=$(date +%s)
+TOTAL_DURATION=$(( TOTAL_END - LOOP_START ))
 echo ""
-echo "⚠️ Reached max iterations ($MAX_ITERATIONS) without complete signal."
+echo "Reached max iterations ($MAX_ITERATIONS) without complete signal."
+echo "Total time: $(format_duration $TOTAL_DURATION) | Failed iterations: $FAILED_ITERATIONS"
 echo "Check $PROGRESS_FILE for current status."
 exit 1
