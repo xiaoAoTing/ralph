@@ -174,6 +174,30 @@ format_duration() {
   fi
 }
 
+# macOS 兼容的超时控制
+run_with_timeout() {
+  local timeout_secs=$1
+  shift
+  "$@" &
+  local cmd_pid=$!
+
+  # 后台计时器
+  ( sleep "$timeout_secs" && kill "$cmd_pid" 2>/dev/null ) &
+  local timer_pid=$!
+
+  wait "$cmd_pid" 2>/dev/null
+  local exit_code=$?
+
+  # 如果进程还在，说明是超时 kill 的
+  kill "$timer_pid" 2>/dev/null
+  wait "$timer_pid" 2>/dev/null
+
+  if [ "$exit_code" -eq 137 ] || [ "$exit_code" -eq 143 ]; then
+    return 124  # 模拟 timeout 命令的退出码
+  fi
+  return $exit_code
+}
+
 LOOP_START=$(date +%s)
 FAILED_ITERATIONS=0
 
@@ -189,7 +213,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
   # 带超时控制的执行
   TIMEOUT_EXIT=0
-  OUTPUT=$(timeout "$TIMEOUT_SECS" bash -c "$(declare -f run_ai_tool); run_ai_tool '$TOOL' '$PROMPT_FILE'" 2>&1 | tee /dev/stderr) || TIMEOUT_EXIT=$?
+  OUTPUT=$(run_with_timeout "$TIMEOUT_SECS" bash -c "$(declare -f run_ai_tool); run_ai_tool '$TOOL' '$PROMPT_FILE'" 2>&1 | tee /dev/stderr) || TIMEOUT_EXIT=$?
 
   ITER_END=$(date +%s)
   ITER_DURATION=$(( ITER_END - ITER_START ))
